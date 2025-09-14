@@ -8,3 +8,4 @@ aiofiles
 pytest
 httpx
 requests
+google-generativeai

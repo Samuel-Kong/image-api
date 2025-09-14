@@ -8,6 +8,7 @@ import threading
 import queue
 from pathlib import Path
 from datetime import datetime, timezone
+from fractions import Fraction
 
 # i chose fast api cos its easy to use
 # usually i use flask though
@@ -26,33 +27,73 @@ from sqlalchemy.orm import Session
 # .env yay
 from dotenv import load_dotenv
 
-# provided api url
-HF_API_URL = "https://api-inference.huggingface.co/models/nlpconnect/vit-gpt2-image-captioning"
-# env token
+# google gemini
+import google.generativeai as genai
+
+
+# env key
 load_dotenv()
-HF_TOKEN = os.getenv("hugapi")
+GEMINI_KEY = os.getenv("geminikey")
+
+# configure gemini if key present
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
+
+
+# helpers to clean EXIF values
+def parse_exif_value(value):
+    if isinstance(value, Fraction):
+        try:
+            return float(value)
+        except Exception:
+            return str(value)
+    if hasattr(value, "numerator") and hasattr(value, "denominator"):
+        try:
+            return float(value.numerator) / float(value.denominator)
+        except Exception:
+            return str(value)
+    if isinstance(value, bytes):
+        try:
+            return value.decode(errors="ignore")
+        except Exception:
+            return value.hex()
+    if isinstance(value, tuple):
+        return [parse_exif_value(v) for v in value]
+    return value
+
+
+def dms_to_deg(dms, ref):
+    """Convert GPS degrees/minutes/seconds to decimal degrees."""
+    try:
+        deg = float(dms[0]) + float(dms[1]) / 60.0 + float(dms[2]) / 3600.0
+        if ref in ["S", "W"]:
+            deg = -deg
+        return deg
+    except Exception:
+        return None
+
 
 # a new function to caption the image that should either give back a string or nothing
 def caption_image(path: Path) -> str | None:
-    # if no token, skip
-    if not HF_TOKEN:
-        logger.warning("HF_API_TOKEN not set — skipping caption")
+    # if no key, skip
+    if not GEMINI_KEY:
+        logger.warning("geminikey not set — skipping caption")
         return None
-    # call api
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     try:
-        with open(path, "rb") as f:
-            resp = requests.post(HF_API_URL, headers=headers, data=f)
-        # respond accordingly
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and len(data) > 0:
-                return data[0].get("generated_text")
-        else:
-            logger.error("HF API error %d: %s", resp.status_code, resp.text)
+        # init model
+        model = genai.GenerativeModel("gemini-2.0-flash-lite")
+        # call api with instruction and image
+        resp = model.generate_content(
+            [
+                "You are an image captioning API. Generate a concise caption describing this image clearly. Return only the text that is used to describe the image. NO formatting is needed",
+                {"mime_type": "image/jpeg", "data": path.read_bytes()},
+            ]
+        )
+        if resp and resp.text:
+            return resp.text.strip()
     except Exception as e:
         # handle failures
-        logger.exception("HF captioning failed: %s", e)
+        logger.exception("Gemini captioning failed: %s", e)
     return None
 
 
@@ -81,6 +122,7 @@ THUMB_DIR.mkdir(parents=True, exist_ok=True)
 # initialize the db
 init_db()
 
+
 # make the function to get db
 def get_db():
     db = SessionLocal()
@@ -92,6 +134,7 @@ def get_db():
 
 # queue system
 task_queue = queue.Queue()
+
 
 # worker thread
 def worker():
@@ -106,6 +149,7 @@ def worker():
         finally:
             # mark task done
             task_queue.task_done()
+
 
 # start the worker thread
 worker_thread = threading.Thread(target=worker, daemon=True)
@@ -182,7 +226,17 @@ def get_image(image_id: str, db: Session = Depends(get_db)):
                 "height": r.height,
                 "format": r.format,
                 "size_bytes": r.size_bytes,
-                "exif": r.exif,
+                "exif": {
+                    "camera_make": r.camera_make,
+                    "camera_model": r.camera_model,
+                    "datetime_original": r.datetime_original,
+                    "lens_model": r.lens_model,
+                    "iso": r.iso,
+                    "focal_length": r.focal_length,
+                    "exposure_time": r.exposure_time,
+                    "gps": {"lat": r.gps_lat, "lon": r.gps_lon},
+                    "raw": r.exif_json,
+                },
             },
             "thumbnails": {
                 "small": f"/api/images/{r.id}/thumbnails/small" if r.thumbnail_small_path else None,
@@ -273,12 +327,50 @@ def process_image_task(image_id: str):
             size_bytes = path.stat().st_size
 
             # EXIF
-            exif_out = None
+            exif_out = {}
+            camera_make = camera_model = datetime_original = lens_model = None
+            iso = focal_length = exposure_time = None
+            gps_lat = gps_lon = None
+
             try:
-                raw_exif = pil_img._getexif()
-                if raw_exif:
-                    exif_out = {ExifTags.TAGS.get(k, k): v for k, v in raw_exif.items()}
-            except Exception:
+                exif_data = pil_img.getexif()
+                if exif_data:
+                    for tag_id, value in exif_data.items():
+                        tag = ExifTags.TAGS.get(tag_id, tag_id)
+                        value = parse_exif_value(value)
+                        exif_out[str(tag)] = value
+
+                        if tag == "Make":
+                            camera_make = value
+                        elif tag == "Model":
+                            camera_model = value
+                        elif tag == "DateTimeOriginal":
+                            datetime_original = value
+                        elif tag == "LensModel":
+                            lens_model = value
+                        elif tag == "ISOSpeedRatings":
+                            try:
+                                iso = int(value)
+                            except Exception:
+                                iso = None
+                        elif tag == "FocalLength":
+                            try:
+                                focal_length = float(value)
+                            except Exception:
+                                focal_length = None
+                        elif tag == "ExposureTime":
+                            exposure_time = str(value)
+                        elif tag == "GPSInfo":
+                            gps_data = value
+                            if isinstance(gps_data, dict):
+                                lat = lon = None
+                                if 2 in gps_data and 1 in gps_data:
+                                    lat = dms_to_deg(gps_data[2], gps_data[1])
+                                if 4 in gps_data and 3 in gps_data:
+                                    lon = dms_to_deg(gps_data[4], gps_data[3])
+                                gps_lat, gps_lon = lat, lon
+            except Exception as e:
+                logger.warning("Could not extract EXIF for %s: %s", image_id, e)
                 exif_out = None
 
             # thumbnails
@@ -301,7 +393,18 @@ def process_image_task(image_id: str):
             r.height = height
             r.format = fmt
             r.size_bytes = size_bytes
-            r.exif = exif_out
+
+            r.camera_make = camera_make
+            r.camera_model = camera_model
+            r.datetime_original = datetime_original
+            r.lens_model = lens_model
+            r.iso = iso
+            r.focal_length = focal_length
+            r.exposure_time = exposure_time
+            r.gps_lat = gps_lat
+            r.gps_lon = gps_lon
+            r.exif_json = exif_out
+
             r.caption = caption
             r.thumbnail_small_path = str(small_path)
             r.thumbnail_medium_path = str(medium_path)

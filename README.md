@@ -1,7 +1,7 @@
 # 🖼️ Image Processing API
 ### Written by GPT-4.1
 A FastAPI-based service for uploading, processing, and analyzing images.  
-Features include thumbnail generation, metadata extraction, and image captioning via Hugging Face’s Inference API.  
+Features include thumbnail generation, structured metadata extraction, and image captioning via **Google Gemini 2.0 Flash Lite**.  
 Built with **FastAPI + SQLite + PIL** and a simple **queue worker system** (FIFO, one task at a time).
 
 ---
@@ -12,9 +12,10 @@ Built with **FastAPI + SQLite + PIL** and a simple **queue worker system** (FIFO
 - Store images & metadata in **SQLite**
 - Extract:
   - Width, height, format, file size
-  - EXIF metadata (when available)
+  - **Structured EXIF metadata** (camera, ISO, GPS, etc.)
+  - Raw EXIF JSON dump
 - Generate **small** (200px) and **medium** (800px) thumbnails
-- AI captions via [Hugging Face Inference API](https://huggingface.co/)
+- AI captions via [Google Generative AI](https://ai.google.dev/)
 - Built-in **queue system** so tasks run sequentially, one at a time
 - REST endpoints with OpenAPI docs (`/docs`)
 
@@ -75,15 +76,15 @@ Activate it:
 pip install -r requirements.txt
 ```
 
-### 4. Configure Hugging Face Token
+### 4. Configure Gemini API Key
 
 Create a `.env` file in the project root:
 
 ```
-hugapi=your_huggingface_token_here
+geminikey=your_google_generative_ai_key_here
 ```
 
-Get your token from [Hugging Face Settings](https://huggingface.co/settings/tokens).
+Get your key from [Google AI Studio](https://aistudio.google.com/app/apikey).
 
 The app automatically loads this via **python-dotenv**.
 
@@ -123,6 +124,18 @@ List all uploaded images with statuses.
 `GET /api/images/{image_id}`
 Retrieve metadata, thumbnails, AI caption, and status.
 
+Structured `exif` block includes:
+
+* `camera_make`
+* `camera_model`
+* `datetime_original`
+* `lens_model`
+* `iso`
+* `focal_length`
+* `exposure_time`
+* `gps { lat, lon }`
+* `raw` (full EXIF JSON dump)
+
 ---
 
 ### Get Thumbnail
@@ -160,7 +173,7 @@ This ensures **only one image is processed at a time**, preventing overload.
 * **FastAPI** — REST framework
 * **SQLite + SQLAlchemy** — lightweight database
 * **Pillow (PIL)** — image processing
-* **Hugging Face Inference API** — AI captions
+* **Google Generative AI (Gemini 2.0 Flash Lite)** — AI captions
 * **Queue + Worker Thread** — sequential task execution
 * **python-dotenv** — environment variable management
 
