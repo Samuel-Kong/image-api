@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 
 # provided api url
-HF_API_URL = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+HF_API_URL = "https://api-inference.huggingface.co/models/nlpconnect/vit-gpt2-image-captioning"
 # env token
 load_dotenv()
 HF_TOKEN = os.getenv("hugapi")
@@ -117,16 +117,20 @@ worker_thread.start()
 # post for upload
 @app.post("/api/images")
 async def upload_image(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    # only allow jpeg and png
     if file.content_type not in ("image/jpeg", "image/png"):
         raise HTTPException(status_code=400, detail="Only JPG and PNG supported")
 
+    # create a new uuid for the image
     image_id = str(uuid.uuid4())
     ext = "jpg" if file.content_type == "image/jpeg" else "png"
     saved_path = ORIG_DIR / f"{image_id}.{ext}"
 
+    # save the file
     with open(saved_path, "wb") as f:
         f.write(await file.read())
 
+    # add to db
     img = ImageModel(
         id=image_id,
         original_filename=file.filename,
@@ -139,9 +143,11 @@ async def upload_image(file: UploadFile = File(...), db: Session = Depends(get_d
     # enqueue task
     task_queue.put(image_id)
 
+    # respond success
     return {"status": "success", "data": {"image_id": image_id, "status": "queued"}, "error": None}
 
 
+# list all images
 @app.get("/api/images")
 def list_images(db: Session = Depends(get_db)):
     rows = db.query(ImageModel).order_by(ImageModel.created_at.desc()).all()
@@ -159,6 +165,7 @@ def list_images(db: Session = Depends(get_db)):
     return {"status": "success", "data": out, "error": None}
 
 
+# get details for a single image
 @app.get("/api/images/{image_id}")
 def get_image(image_id: str, db: Session = Depends(get_db)):
     r = db.query(ImageModel).filter(ImageModel.id == image_id).first()
@@ -189,8 +196,10 @@ def get_image(image_id: str, db: Session = Depends(get_db)):
     }
 
 
+# get thumbnail by size
 @app.get("/api/images/{image_id}/thumbnails/{size}")
 def get_thumbnail(image_id: str, size: str, db: Session = Depends(get_db)):
+    # only allow small or medium
     if size not in ("small", "medium"):
         raise HTTPException(400, "size must be 'small' or 'medium'")
     r = db.query(ImageModel).filter(ImageModel.id == image_id).first()
@@ -202,6 +211,7 @@ def get_thumbnail(image_id: str, size: str, db: Session = Depends(get_db)):
     return FileResponse(path)
 
 
+# get stats for all images
 @app.get("/api/stats")
 def stats(db: Session = Depends(get_db)):
     total = db.query(ImageModel).count()
@@ -210,6 +220,7 @@ def stats(db: Session = Depends(get_db)):
     queued = db.query(ImageModel).filter(ImageModel.status == "queued").count()
     processing = db.query(ImageModel).filter(ImageModel.status == "processing").count()
 
+    # calculate average processing time
     avg_ms = None
     rows = db.query(ImageModel).filter(ImageModel.status == "done").all()
     if rows:
@@ -229,6 +240,7 @@ def stats(db: Session = Depends(get_db)):
         "error": None,
     }
 
+
 # processing function
 def process_image_task(image_id: str):
     db = SessionLocal()
@@ -244,6 +256,7 @@ def process_image_task(image_id: str):
         db.add(r)
         db.commit()
 
+        # check if file exists
         path = Path(r.original_path)
         if not path.exists():
             r.status = "failed"
@@ -252,6 +265,7 @@ def process_image_task(image_id: str):
             db.commit()
             return
 
+        # open and process image
         with Image.open(path) as pil_img:
             pil_img = pil_img.convert("RGB")
             width, height = pil_img.size
@@ -299,11 +313,13 @@ def process_image_task(image_id: str):
             logger.info("Processed %s in %d ms", image_id, r.processing_time_ms)
 
     except UnidentifiedImageError:
+        # handle invalid image
         r.status = "failed"
         r.error = "Invalid image file"
         db.add(r)
         db.commit()
     except Exception as e:
+        # handle unexpected errors
         r.status = "failed"
         r.error = str(e)
         db.add(r)
