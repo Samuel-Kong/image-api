@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pillow
+sqlalchemy
+pydantic
+python-multipart
+aiofiles
+pytest
+httpx
+requests
