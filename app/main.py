@@ -26,6 +26,8 @@ from .models import Image as ImageModel
 from sqlalchemy.orm import Session
 # .env yay
 from dotenv import load_dotenv
+# redirect for base url
+from fastapi.responses import RedirectResponse
 
 # google gemini
 import google.generativeai as genai
@@ -157,6 +159,11 @@ worker_thread.start()
 
 
 # required endpoints!
+
+@app.get("/", include_in_schema=False)
+def redirect_to_docs():
+    return RedirectResponse(url="/docs")
+
 
 # post for upload
 @app.post("/api/images")
